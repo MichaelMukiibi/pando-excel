@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pando Excel - SMS Uploader</title>
+    <!-- Load Tailwind CSS via CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Load Lucide Icons via CDN -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <!-- Load SheetJS (XLSX) Library via CDN -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    
+    <style>
+        /* Configure Font and basic styling */
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f9fafb; /* bg-gray-50 */
+        }
+        /* Ensure responsive table wrapping */
+        .table-responsive {
+            overflow-x: auto;
+        }
+    </style>
+</head>
+<body class="min-h-screen p-4 sm:p-8">
+
+    <div id="app" class="max-w-4xl mx-auto">
+        <h1 class="text-3xl font-extrabold text-indigo-700 mb-6 flex items-center">
+            <svg class="w-8 h-8 mr-3 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m-5 8a9 9 0 100-18 9 9 0 000 18z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5a2 2 0 012-2h4a2 2 0 012 2v4a2 2 0 01-2 2h-4a2 2 0 01-2-2v-4z"></path></svg>
+            Pando Excel SMS Configurator
+        </h1>
+        <p class="text-gray-600 mb-8">
+            Upload your Excel file to configure columns for bulk SMS delivery. 
+            **Data processing occurs locally** for security.
+        </p>
+
+        <!-- --- File Upload Area --- -->
+        <div class="bg-white p-6 rounded-xl shadow-lg mb-8 border border-gray-200">
+            <label htmlFor="file-upload" class="flex flex-col items-center justify-center p-6 border-2 border-dashed border-indigo-300 rounded-lg cursor-pointer hover:bg-indigo-50 transition-colors">
+                <svg class="w-8 h-8 text-indigo-500 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path></svg>
+                <span id="file-name-display" class="font-semibold text-indigo-600">
+                    Click to Upload Excel File (.xlsx, .xls)
+                </span>
+                <input 
+                    id="file-upload"
+                    type="file"
+                    accept=".xlsx, .xls"
+                    onchange="handleFileUpload(event)"
+                    class="hidden"
+                />
+            </label>
+        </div>
+        
+        <!-- --- Error Display Container --- -->
+        <div id="error-container"></div>
+
+        <!-- --- Configuration Section Container --- -->
+        <div id="config-container"></div>
+        
+        <!-- --- Data Preview Container --- -->
+        <div id="preview-container"></div>
+
+        <!-- --- Empty State / Footer --- -->
+        <div id="empty-state" class="text-center py-10 text-gray-500 italic">
+            Awaiting file upload...
+        </div>
+    </div>
+
+    <script>
+        // --- Application State ---
+        const appState = {
+            workbook: null,
+            sheetNames: [],
+            data: {}, // {sheetName: [ [row1], [row2] ]}
+            selectedSheetName: '',
+            columns: [],
+            phoneCol: '',
+            messageCol: '',
+            bulkMessage: '',
+            error: null,
+            fileName: '',
+        };
+
+        // --- DOM References ---
+        const $errorContainer = document.getElementById('error-container');
+        const $configContainer = document.getElementById('config-container');
+        const $previewContainer = document.getElementById('preview-container');
+        const $emptyState = document.getElementById('empty-state');
+        const $fileNameDisplay = document.getElementById('file-name-display');
+
+        /**
+         * Converts the first row of a sheet (which usually contains headers) into an array of column names.
+         * @param {Array<Array<any>>} sheetData 
+         * @returns {Array<string>} Column names.
+         */
+        const getColumnNames = (sheetData) => {
+            if (!sheetData || sheetData.length === 0) return [];
+            // Assuming the first row contains headers
+            return sheetData[0].map(header => String(header || '').trim()).filter(Boolean);
+        };
+
+        /**
+         * Central function to update the global state and trigger a re-render.
+         * @param {Object} newState 
+         */
+        const updateState = (newState) => {
+            Object.assign(appState, newState);
+            renderApp();
+        };
+
+        // --- Event Handlers ---
+
+        /**
+         * Handles file selection, reads the Excel file, and parses its contents.
+         * @param {Event} event 
+         */
+        const handleFileUpload = (event) => {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            // Resetting state
+            updateState({
+                workbook: null,
+                sheetNames: [],
+                data: {},
+                selectedSheetName: '',
+                columns: [],
+                phoneCol: '',
+                messageCol: '',
+                bulkMessage: '',
+                error: null,
+                fileName: file.name
+            });
+
+            if (typeof XLSX === 'undefined') {
+                updateState({ error: "XLSX library not loaded. Please check the CDN script." });
+                return;
+            }
+
+            const reader = new FileReader();
+
+            reader.onload = (e) => {
+                try {
+                    const fileData = e.target.result;
+                    // Use type: 'binary' for compatibility with various browsers
+                    const wb = XLSX.read(fileData, { type: 'binary', cellDates: true, cellNF: false, cellText: false });
+                    
+                    const newSheetNames = wb.SheetNames;
+                    const newData = {};
+
+                    // Parse each sheet into an array of arrays (AoA)
+                    newSheetNames.forEach(name => {
+                        const ws = wb.Sheets[name];
+                        // header:1 exports data as an array of arrays (AoA), with the first row being headers
+                        newData[name] = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false });
+                    });
+
+                    let defaultSheetName = '';
+                    let defaultColumns = [];
+
+                    if (newSheetNames.length > 0) {
+                        defaultSheetName = newSheetNames[0];
+                        defaultColumns = getColumnNames(newData[defaultSheetName]);
+                    }
+
+                    updateState({
+                        workbook: wb,
+                        sheetNames: newSheetNames,
+                        data: newData,
+                        selectedSheetName: defaultSheetName,
+                        columns: defaultColumns,
+                    });
+
+                } catch (err) {
+                    console.error("Error parsing file:", err);
+                    updateState({ error: `Failed to process file: ${err.message}` });
+                }
+            };
+
+            reader.onerror = () => {
+                updateState({ error: "Error reading file." });
+            };
+
+            reader.readAsBinaryString(file);
+        };
+
+        /**
+         * Handles sheet selection change and updates the available columns.
+         */
+        const handleSheetChange = (e) => {
+            const newSheetName = e.target.value;
+            let newColumns = [];
+            
+            if (appState.data[newSheetName]) {
+                newColumns = getColumnNames(appState.data[newSheetName]);
+            }
+            
+            updateState({
+                selectedSheetName: newSheetName,
+                phoneCol: '',
+                messageCol: '',
+                columns: newColumns,
+            });
+        };
+
+        /**
+         * Dummy function for the final action button.
+         */
+        const confirmConfiguration = () => {
+            if (!appState.phoneCol || (appState.messageCol === '' && appState.bulkMessage.trim() === '')) {
+                // This shouldn't be possible if the button is disabled, but good for safety.
+                alert('Configuration is incomplete. Please select a phone column and provide a message.');
+                return;
+            }
+
+            // In a real application, this is where you would send the data to your server
+            // for processing via the sms.thepandoranetworks.com API.
+            
+            let messageType = appState.messageCol ? 'personalized' : 'bulk';
+            const recipientCount = appState.data[appState.selectedSheetName].length - 1;
+
+            const modalContent = `
+                <h3 class="text-lg font-bold text-gray-800 mb-2">Configuration Summary</h3>
+                <p><strong>Sheet:</strong> ${appState.selectedSheetName}</p>
+                <p><strong>Recipients:</strong> ${recipientCount} rows</p>
+                <p><strong>Phone Column:</strong> ${appState.phoneCol}</p>
+                <p><strong>Message Type:</strong> ${messageType}</p>
+                <p><strong>Message Column:</strong> ${appState.messageCol || 'N/A'}</p>
+                <p><strong>Bulk Message:</strong> ${appState.bulkMessage.substring(0, 50)}...</p>
+                <p class="mt-4 font-semibold text-green-600">Sending Logic Not Implemented. Configuration Confirmed!</p>
+            `;
+            
+            // Replicate a simple modal/alert (since alert() is forbidden)
+            const modal = document.createElement('div');
+            modal.className = 'fixed inset-0 bg-gray-600 bg-opacity-75 flex items-center justify-center z-50';
+            modal.innerHTML = `
+                <div class="bg-white p-6 rounded-lg shadow-xl max-w-sm w-full">
+                    ${modalContent}
+                    <button onclick="this.parentNode.parentNode.remove()" class="mt-4 w-full py-2 bg-indigo-600 text-white font-semibold rounded-lg hover:bg-indigo-700 transition-colors">
+                        Close
+                    </button>
+                </div>
+            `;
+            document.body.appendChild(modal);
+        };
+
+        // --- Rendering Functions ---
+
+        const renderError = () => {
+            $errorContainer.innerHTML = '';
+            if (appState.error) {
+                $errorContainer.innerHTML = `
+                    <div class="bg-red-100 border-l-4 border-red-500 text-red-700 p-4 rounded-lg mb-6 flex items-center">
+                        <svg class="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>
+                        <p class="font-medium">${appState.error}</p>
+                    </div>
+                `;
+            }
+        };
+
+        const renderConfiguration = () => {
+            $configContainer.innerHTML = '';
+            if (appState.sheetNames.length === 0) return;
+
+            // Generate options for sheet select
+            const sheetOptions = appState.sheetNames.map(name => 
+                `<option value="${name}" ${name === appState.selectedSheetName ? 'selected' : ''}>${name}</option>`
+            ).join('');
+
+            // Generate options for column selects
+            const columnOptions = appState.columns.map(col => 
+                `<option value="${col}">${col}</option>`
+            ).join('');
+
+            const isSendDisabled = !appState.phoneCol || (appState.messageCol === '' && appState.bulkMessage.trim() === '');
+            const sendButtonClass = isSendDisabled 
+                ? 'bg-gray-400 cursor-not-allowed' 
+                : 'bg-indigo-600 hover:bg-indigo-700 shadow-md';
+            
+            const selectedSheetData = appState.data[appState.selectedSheetName] || [];
+            const recipientCount = selectedSheetData.length > 1 ? selectedSheetData.length - 1 : 0;
+
+
+            $configContainer.innerHTML = `
+                <div class="bg-white p-6 rounded-xl shadow-lg mb-8 border border-gray-200 space-y-6">
+                    <h2 class="text-xl font-bold text-gray-800 flex items-center">
+                        <svg class="w-5 h-5 mr-2 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 10h16M4 14h16M4 18h16"></path></svg>
+                        1. Select Sheet & Columns
+                    </h2>
+
+                    <!-- Sheet Selection -->
+                    <div>
+                        <label for="sheet-select" class="block text-sm font-medium text-gray-700 mb-1">
+                            Select Sheet
+                        </label>
+                        <select
+                            id="sheet-select"
+                            onchange="handleSheetChange(event)"
+                            class="w-full p-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
+                        >
+                            ${sheetOptions}
+                        </select>
+                    </div>
+
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <!-- Phone Number Column Selection -->
+                        <div>
+                            <label for="phone-col-select" class="block text-sm font-medium text-gray-700 mb-1 flex items-center">
+                                <svg class="w-4 h-4 mr-1 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z"></path></svg>
+                                Phone Number Column (Required)
+                            </label>
+                            <select
+                                id="phone-col-select"
+                                onchange="updateState({ phoneCol: event.target.value })"
+                                class="w-full p-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
+                            >
+                                <option value="" disabled selected>Select Column for Phone Numbers</option>
+                                ${appState.phoneCol ? `<option value="${appState.phoneCol}" selected>${appState.phoneCol}</option>` : ''}
+                                ${columnOptions.split('\n').filter(opt => !appState.phoneCol || opt.indexOf(appState.phoneCol) === -1).join('')}
+                            </select>
+                            ${!appState.phoneCol ? '<p class="mt-1 text-xs text-red-500">Please select the column containing recipient phone numbers.</p>' : ''}
+                        </div>
+
+                        <!-- Personalized Message Column Selection -->
+                        <div>
+                            <label for="message-col-select" class="block text-sm font-medium text-gray-700 mb-1 flex items-center">
+                                <svg class="w-4 h-4 mr-1 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10h.01M12 10h.01M16 10h.01M9 21h6a2 2 0 002-2v-3a2 2 0 00-2-2H9a2 2 0 00-2 2v3a2 2 0 002 2z"></path></svg>
+                                Personalized Message Column (Optional)
+                            </label>
+                            <select
+                                id="message-col-select"
+                                onchange="updateState({ messageCol: event.target.value })"
+                                class="w-full p-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
+                            >
+                                <option value="" ${appState.messageCol === '' ? 'selected' : ''}>Do not use personalized messages</option>
+                                ${appState.messageCol ? `<option value="${appState.messageCol}" selected>${appState.messageCol}</option>` : ''}
+                                ${columnOptions.split('\n').filter(opt => !appState.messageCol || opt.indexOf(appState.messageCol) === -1).join('')}
+                            </select>
+                        </div>
+                    </div>
+
+                    <!-- Bulk Message Input -->
+                    <div class='pt-4'>
+                        <label for="bulk-message" class="block text-sm font-medium text-gray-700 mb-1 flex items-center">
+                            <svg class="w-4 h-4 mr-1 text-purple-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 8h10M7 12h4m1 8l-4-4H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-3l-4 4z"></path></svg>
+                            Bulk Message Content
+                        </label>
+                        <textarea
+                            id="bulk-message"
+                            rows="3"
+                            value="${appState.bulkMessage}"
+                            oninput="updateState({ bulkMessage: event.target.value })"
+                            placeholder="Enter the message to send to all recipients (required if no personalized message column is selected)."
+                            class="w-full p-3 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 resize-none"
+                        >${appState.bulkMessage}</textarea>
+                        <p class="mt-1 text-xs text-gray-500">This message will be used if you haven't selected a Personalized Message Column.</p>
+                    </div>
+
+                    <!-- Summary/Action -->
+                    <div class='pt-6 border-t border-gray-100'>
+                        <button
+                            onclick="confirmConfiguration()"
+                            ${isSendDisabled ? 'disabled' : ''}
+                            class="w-full py-3 rounded-xl font-bold text-white transition-colors flex items-center justify-center ${sendButtonClass}"
+                        >
+                            <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8m-2-3a2 2 0 00-2-2H5a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2V5z"></path></svg>
+                            Confirm Configuration & Send SMS
+                        </button>
+                        <p class='text-center text-xs text-gray-500 mt-2'>
+                            ${appState.phoneCol ? `Ready to process ${recipientCount} recipients.` : 'Select Phone Column to enable sending.'}
+                        </p>
+                    </div>
+                </div>
+            `;
+
+            // Manually set select values after innerHTML update to preserve selected state
+            document.getElementById('sheet-select').value = appState.selectedSheetName;
+            const phoneSelect = document.getElementById('phone-col-select');
+            if (phoneSelect) phoneSelect.value = appState.phoneCol;
+            const messageSelect = document.getElementById('message-col-select');
+            if (messageSelect) messageSelect.value = appState.messageCol;
+
+        };
+
+        const renderPreview = () => {
+            $previewContainer.innerHTML = '';
+            const selectedSheetData = appState.data[appState.selectedSheetName] || [];
+            if (selectedSheetData.length === 0) return;
+
+            const columns = appState.columns;
+            // Get data rows (excluding header row)
+            const dataRows = selectedSheetData.slice(1);
+            
+            // Limit preview to 5 data rows + 1 header row
+            const previewRows = dataRows.slice(0, 5);
+            const totalRows = dataRows.length;
+            
+            // Map column names to header cells
+            const headerRow = columns.map((colName) => {
+                let colClass = '';
+                if (colName === appState.phoneCol) {
+                    colClass = 'bg-green-100 text-green-700';
+                } else if (colName === appState.messageCol) {
+                    colClass = 'bg-blue-100 text-blue-700';
+                }
+                return `
+                    <th
+                        class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider ${colClass}"
+                    >
+                        ${colName}
+                    </th>
+                `;
+            }).join('');
+
+            // Map data to table rows/cells
+            const bodyRows = previewRows.map((row) => {
+                const cells = row.map((cell, colIndex) => {
+                    return `
+                        <td class="px-6 py-2 whitespace-nowrap text-sm text-gray-900">
+                            ${String(cell || '')}
+                        </td>
+                    `;
+                }).join('');
+                return `<tr>${cells}</tr>`;
+            }).join('');
+
+            let footer = '';
+            if (totalRows > 5) {
+                 footer = `
+                    <tr>
+                        <td colspan="${columns.length}" class="px-6 py-2 text-center text-sm italic text-gray-500">
+                            ... ${totalRows - 5} more recipients not shown in preview ...
+                        </td>
+                    </tr>
+                 `;
+            } else if (totalRows === 0) {
+                 footer = `
+                    <tr>
+                        <td colspan="${columns.length}" class="px-6 py-4 text-center text-sm italic text-gray-500">
+                            No data rows found in this sheet.
+                        </td>
+                    </tr>
+                 `;
+            }
+
+
+            $previewContainer.innerHTML = `
+                <div class="bg-white p-6 rounded-xl shadow-lg border border-gray-200">
+                    <h2 class="text-xl font-bold text-gray-800 mb-4 flex items-center">
+                        <svg class="w-5 h-5 mr-2 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 10h16M4 14h16M4 18h16"></path></svg>
+                        2. Data Preview: <span class='font-normal ml-1 italic text-base'>"${appState.selectedSheetName}"</span>
+                    </h2>
+                    <div class="table-responsive max-h-80">
+                        <table class="min-w-full divide-y divide-gray-200">
+                            <thead class="bg-gray-50 sticky top-0 z-10">
+                                <tr>${headerRow}</tr>
+                            </thead>
+                            <tbody class="bg-white divide-y divide-gray-200">
+                                ${bodyRows}
+                                ${footer}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            `;
+        };
+        
+        const renderFileName = () => {
+            $fileNameDisplay.textContent = appState.fileName 
+                ? `File Selected: ${appState.fileName}` 
+                : 'Click to Upload Excel File (.xlsx, .xls)';
+        }
+
+        // --- Main Render Loop ---
+        const renderApp = () => {
+            // Update file upload state
+            renderFileName();
+
+            // Handle visibility of configuration/preview sections
+            if (appState.sheetNames.length > 0) {
+                $emptyState.classList.add('hidden');
+            } else {
+                $emptyState.classList.remove('hidden');
+            }
+
+            // Render all components
+            renderError();
+            renderConfiguration();
+            renderPreview();
+            
+            // Re-render Lucide icons if they were used (though we use raw SVG for stability here)
+            if (typeof lucide !== 'undefined') {
+                 lucide.createIcons();
+            }
+        };
+
+        // Initial render on load
+        window.onload = renderApp;
+    </script>
+</body>
+</html>
